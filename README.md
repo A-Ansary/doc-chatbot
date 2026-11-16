@@ -3,6 +3,8 @@
 A support chatbot that answers customer questions from a business's own documents (FAQ, policies,
 price lists, manuals), with the source file and page shown under each answer. Built with FastAPI and Claude.
 
+![DocChat screenshot](docs/screenshot.png)
+
 ## Features
 - Upload PDF, TXT or Markdown files from the browser; re-uploading a file replaces it.
 - BM25 keyword retrieval - no vector database or embeddings to set up.
