@@ -8,6 +8,8 @@ Run:  uvicorn app.main:app --reload     then open http://localhost:8000
 from __future__ import annotations
 
 import os
+import re
+import time
 from pathlib import Path
 
 import anthropic
@@ -39,8 +41,8 @@ app = FastAPI(title="Document Q&A Chatbot")
 SYSTEM = f"""You are the customer support assistant for {BUSINESS}.
 Answer only from the document excerpts provided in each message. If they don't contain the answer,
 say you don't know and suggest contacting the team - never invent prices, policies or facts.
-Keep answers short and friendly (under 120 words). Reply in the customer's language.
-After the answer, list the sources you used as: Sources: [file, page N]."""
+Keep answers short and friendly (under 120 words), in plain text with no markdown (no asterisks or #).
+Reply in the customer's language. Don't list sources - the app shows them under your answer."""
 
 
 class Turn(BaseModel):
@@ -96,23 +98,31 @@ def ask_gemini(messages: list[dict]) -> str:
         timeout=20_000, retry_options=types.HttpRetryOptions(attempts=1)))  # fail fast, then try the next model
     config = types.GenerateContentConfig(system_instruction=SYSTEM, max_output_tokens=2000)
     # Each free model has its own quota: when one is used up (429), fall through to the next.
+    busy, resp = False, None
     for model in dict.fromkeys([GEMINI_MODEL, *GEMINI_FALLBACKS]):
-        try:
-            resp = _gemini.models.generate_content(model=model, contents=contents, config=config)
+        for attempt in range(2):                # one quick retry when Google is momentarily overloaded
+            try:
+                resp = _gemini.models.generate_content(model=model, contents=contents, config=config)
+                break
+            except errors.ClientError as exc:
+                if exc.code in (404, 429):      # quota used up, or model not offered to this key
+                    break
+                if exc.code in (400, 401, 403):
+                    raise HTTPException(500, f"Gemini rejected the request ({exc.code}) - check GEMINI_API_KEY.") from exc
+                raise HTTPException(502, f"AI service error ({exc.code}).") from exc
+            except (errors.ServerError, TimeoutError, OSError):
+                busy = True
+                time.sleep(1)
+        if resp is not None:
             break
-        except errors.ClientError as exc:
-            if exc.code in (404, 429):          # quota used up, or model not offered to this key
-                continue
-            if exc.code in (400, 401, 403):
-                raise HTTPException(500, f"Gemini rejected the request ({exc.code}) - check GEMINI_API_KEY.") from exc
-            raise HTTPException(502, f"AI service error ({exc.code}).") from exc
-        except errors.ServerError:
-            continue
     else:
-        raise HTTPException(429, "The free AI quota is used up for now - please try again later.")
+        if busy:
+            raise HTTPException(503, "The free AI is busy right now - please try again in a minute.")
+        raise HTTPException(429, "The free AI quota is used up for today - it resets tomorrow.")
     if not resp.text:
         raise Refused
-    return resp.text.strip()
+    text = re.sub(r"\n*\s*Sources?:.*$", "", resp.text.strip(), flags=re.S | re.I)   # the UI shows sources
+    return re.sub(r"\*\*|__|^#+\s*", "", text, flags=re.M).strip()
 
 
 @app.get("/")
