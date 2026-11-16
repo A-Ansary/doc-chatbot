@@ -164,6 +164,9 @@ def delete(name: str) -> dict:
 @app.post("/api/chat")
 def chat(body: ChatIn) -> dict:
     hits = store.search(body.message)
+    fallback = not hits and 0 < len(store.chunks) <= 40
+    if fallback:                       # no keyword match (e.g. an Arabic question about English documents):
+        hits = store.chunks            # small knowledge base, so let the AI read all of it
     if not hits:
         return {"answer": "I couldn't find anything about that in our documents. "
                           "Please contact our team and they'll be happy to help.", "sources": []}
@@ -174,5 +177,5 @@ def chat(body: ChatIn) -> dict:
         answer = ask_gemini(messages) if PROVIDER == "gemini" else ask_claude(messages)
     except Refused:
         return {"answer": "Sorry, I can't help with that one. Please contact our team.", "sources": []}
-    sources = sorted({(c.source, c.page) for c in hits})
+    sources = [] if fallback else sorted({(c.source, c.page) for c in hits})
     return {"answer": answer, "sources": [{"file": f, "page": p} for f, p in sources]}
