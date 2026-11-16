@@ -28,8 +28,8 @@ BUSINESS = os.getenv("BUSINESS_NAME", "our company")
 MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
 ALLOWED = {".pdf", ".txt", ".md"}
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-GEMINI_FALLBACKS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]   # tried in order when the main model is out of free quota
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")  # fast; full flash is often overloaded on the free tier
+GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash"]   # tried in order when the main model is out of free quota
 # "claude" (paid, best answers) or "gemini" (Google's free tier). Default: Claude if its key is set, else Gemini.
 PROVIDER = os.getenv("AI_PROVIDER") or ("claude" if os.getenv("ANTHROPIC_API_KEY") else "gemini")
 
@@ -93,7 +93,7 @@ def ask_gemini(messages: list[dict]) -> str:
                               parts=[types.Part.from_text(text=m["content"])]) for m in messages]
     global _gemini
     _gemini = _gemini or genai.Client(http_options=types.HttpOptions(      # keep one client alive (reads GEMINI_API_KEY)
-        timeout=45_000, retry_options=types.HttpRetryOptions(attempts=1)))  # fail fast, then try the next model
+        timeout=20_000, retry_options=types.HttpRetryOptions(attempts=1)))  # fail fast, then try the next model
     config = types.GenerateContentConfig(system_instruction=SYSTEM, max_output_tokens=2000)
     # Each free model has its own quota: when one is used up (429), fall through to the next.
     for model in dict.fromkeys([GEMINI_MODEL, *GEMINI_FALLBACKS]):
