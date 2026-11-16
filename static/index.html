@@ -47,6 +47,7 @@ form button:disabled{opacity:.5}
 </main>
 <script>
 const $ = s => document.querySelector(s), history = [];
+const tok = new URLSearchParams(location.search).get("token") || "", T = tok ? "?token=" + encodeURIComponent(tok) : "";
 const esc = t => t.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 
 async function loadDocs(){
@@ -56,12 +57,12 @@ async function loadDocs(){
     || `<li><small>No documents yet</small></li>`;
 }
 $("#docs").onclick = async e => { const n = e.target.dataset.n; if (!n) return;
-  await fetch("/api/documents/" + encodeURIComponent(n), {method: "DELETE"}); loadDocs(); };
+  await fetch("/api/documents/" + encodeURIComponent(n) + T, {method: "DELETE"}); loadDocs(); };
 
 async function upload(files){
   for (const f of files) {
     const fd = new FormData(); fd.append("file", f);
-    const r = await fetch("/api/documents", {method: "POST", body: fd});
+    const r = await fetch("/api/documents" + T, {method: "POST", body: fd});
     if (!r.ok) alert((await r.json()).detail || "Upload failed");
   }
   loadDocs();

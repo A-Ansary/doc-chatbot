@@ -7,13 +7,17 @@ Run:  uvicorn app.main:app --reload     then open http://localhost:8000
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import smtplib
 import time
+from datetime import datetime
+from email.message import EmailMessage
 from pathlib import Path
 
 import anthropic
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -23,7 +27,8 @@ from .rag import Store
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")             # keys live in .env (never commit it)
-DOCS = ROOT / "data" / "docs"
+DATA = ROOT / os.getenv("DATA_DIR", "data")   # one folder per business: documents, index, leads
+DOCS = DATA / "docs"
 DOCS.mkdir(parents=True, exist_ok=True)
 
 BUSINESS = os.getenv("BUSINESS_NAME", "our company")
@@ -35,19 +40,37 @@ GEMINI_FALLBACKS = ["gemini-3.1-flash-lite", "gemini-3.5-flash"]   # tried in or
 # "claude" (paid, best answers) or "gemini" (Google's free tier). Default: Claude if its key is set, else Gemini.
 PROVIDER = os.getenv("AI_PROVIDER") or ("claude" if os.getenv("ANTHROPIC_API_KEY") else "gemini")
 
-store = Store(ROOT / "data" / "index.json")
+store = Store(DATA / "index.json")
 app = FastAPI(title="Document Q&A Chatbot")
 
 SYSTEM = f"""You are the customer support assistant for {BUSINESS}.
 Answer only from the document excerpts provided in each message. If they don't contain the answer,
 say you don't know and suggest contacting the team - never invent prices, policies or facts.
 Keep answers short and friendly (under 120 words), in plain text with no markdown (no asterisks or #).
-Reply in the customer's language. Don't list sources - the app shows them under your answer. Always end by inviting the customer to visit the gym."""
+If the customer wants to book an appointment, say they can leave their details with the "Request appointment"
+button and the team will confirm. Reply in the customer's language. Don't list sources - the app shows them under your answer."""
+SYSTEM += "\n" + os.getenv("EXTRA_INSTRUCTIONS", "")   # per-business rules, e.g. "Always invite the customer to visit."
 
 
 class Turn(BaseModel):
     role: str = Field(pattern="^(user|assistant)$")
     content: str = Field(max_length=4000)
+
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")      # if set, uploading/removing documents needs ?token=...
+LEADS = DATA / "leads.jsonl"
+
+
+def require_admin(token: str) -> None:
+    if ADMIN_TOKEN and token != ADMIN_TOKEN:
+        raise HTTPException(401, "Admin token required.")
+
+
+class LeadIn(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    contact: str = Field(min_length=5, max_length=120, description="Phone or email")
+    preferred_time: str = Field(default="", max_length=120)
+    note: str = Field(default="", max_length=500)
 
 
 class ChatIn(BaseModel):
@@ -130,13 +153,73 @@ def home() -> FileResponse:
     return FileResponse(ROOT / "static" / "index.html")
 
 
+@app.get("/demo")
+def demo_site() -> FileResponse:
+    """A sample business website with the chat bubble installed (for showing clients)."""
+    return FileResponse(ROOT / "static" / "demo.html")
+
+
+@app.get("/widget")
+def widget() -> FileResponse:
+    return FileResponse(ROOT / "static" / "widget.html")
+
+
+@app.get("/widget.js")
+def widget_js() -> FileResponse:
+    return FileResponse(ROOT / "static" / "widget.js", media_type="application/javascript")
+
+
+@app.get("/api/info")
+def info() -> dict:
+    return {"business": BUSINESS, "admin_locked": bool(ADMIN_TOKEN)}
+
+
+@app.post("/api/lead")
+def lead(body: LeadIn, background: BackgroundTasks) -> dict:
+    """Appointment request from the chat: saved to data/leads.jsonl and emailed to the business if SMTP is set."""
+    entry = {"time": datetime.now().isoformat(timespec="seconds"), **body.model_dump()}
+    LEADS.parent.mkdir(parents=True, exist_ok=True)
+    with LEADS.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    background.add_task(email_lead, entry)
+    return {"ok": True}
+
+
+@app.get("/api/leads")
+def leads(token: str = "") -> dict:
+    require_admin(token)
+    rows = [json.loads(l) for l in LEADS.read_text(encoding="utf-8").splitlines()] if LEADS.exists() else []
+    return {"leads": rows[::-1]}
+
+
+def email_lead(entry: dict) -> None:
+    """Send the request to LEAD_EMAIL using SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD (e.g. a Gmail app password)."""
+    to, host = os.getenv("LEAD_EMAIL"), os.getenv("SMTP_HOST")
+    if not (to and host):
+        return
+    msg = EmailMessage()
+    msg["Subject"] = f"New appointment request - {entry['name']}"
+    msg["From"] = os.getenv("SMTP_USER", to)
+    msg["To"] = to
+    msg.set_content("\n".join(f"{k.replace('_', ' ').title()}: {v}" for k, v in entry.items() if v))
+    try:
+        with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=20) as smtp:
+            smtp.starttls()
+            if os.getenv("SMTP_USER"):
+                smtp.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASSWORD", ""))
+            smtp.send_message(msg)
+    except (OSError, smtplib.SMTPException) as exc:
+        print("Could not email lead:", exc)
+
+
 @app.get("/api/documents")
 def documents() -> dict:
     return {"documents": store.sources()}
 
 
 @app.post("/api/documents")
-async def upload(file: UploadFile) -> dict:
+async def upload(file: UploadFile, token: str = "") -> dict:
+    require_admin(token)
     name = Path(file.filename or "").name
     if Path(name).suffix.lower() not in ALLOWED:
         raise HTTPException(400, "Only PDF, TXT and MD files are supported.")
@@ -154,7 +237,8 @@ async def upload(file: UploadFile) -> dict:
 
 
 @app.delete("/api/documents/{name}")
-def delete(name: str) -> dict:
+def delete(name: str, token: str = "") -> dict:
+    require_admin(token)
     name = Path(name).name
     store.remove(name)
     (DOCS / name).unlink(missing_ok=True)

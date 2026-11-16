@@ -2,3 +2,8 @@
 .venv/
 data/index.json
 __pycache__/
+data/*/
+!data/docs/
+data/leads.jsonl
+demos/*/index.json
+demos/*/leads.jsonl
