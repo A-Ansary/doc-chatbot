@@ -72,7 +72,7 @@ drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
 drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files); };
 
-function add(cls, html){ const d = document.createElement("div"); d.className = "m " + cls; d.innerHTML = html;
+function add(cls, html){ const d = document.createElement("div"); d.className = "m " + cls; d.dir = "auto"; d.innerHTML = html;
   $("#log").appendChild(d); $("#log").scrollTop = 1e9; return d; }
 
 $("#ask").onsubmit = async e => {
